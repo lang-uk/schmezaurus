@@ -1,0 +1,11 @@
+requests
+diskcache
+wikipedia-api
+spacy
+tabulate
+sentence-transformers
+numpy
+tqdm
+plotly
+scikit-learn
+pandas
