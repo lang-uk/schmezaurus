@@ -120,7 +120,7 @@ class WikidataValidator:
                 result = result_data["results"]["bindings"]
 
                 # Cache the successful result
-                self.cache.set(cache_key, result, expire=86400)  # Cache for 24 hours
+                self.cache.set(cache_key, result, expire=30 * 86400)  # Cache for 30 days
                 logging.debug(f"Cached result for {cache_key} ({len(result)} results)")
 
                 return result

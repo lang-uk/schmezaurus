@@ -12,7 +12,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 import diskcache as dc
@@ -154,7 +154,7 @@ class WikipediaAPIExtractor:
                     )
 
             # Cache the result (including None for non-existent pages)
-            self.cache.set(cache_key, result, expire=604800)  # Cache for 7 days
+            self.cache.set(cache_key, result, expire=30 * 86400)  # Cache for 30 days
             logging.debug(f"Cached result for {language}:{page_title}")
 
             return result
