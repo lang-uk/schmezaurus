@@ -111,6 +111,7 @@ class BilingualAligner:
         Args:
             jsonl_path: Path to occurrence embeddings JSONL file.
             language: Language code ('en' or 'uk').
+            max_terms: Maximum number of unique terms to load.
         """
         groups = self.en_groups if language == "en" else self.uk_groups
 
@@ -158,9 +159,6 @@ class BilingualAligner:
                     )
                     continue
 
-        # if max_terms:
-        #     groups = {k: groups[k] for k in list(groups.keys())[:max_terms]}
-
         logging.info(
             f"Loaded {sum(len(group) for group in groups.values())} occurrences "
             f"for {len(groups)} unique {language.upper()} lemmas from {jsonl_path}"
@@ -191,114 +189,6 @@ class BilingualAligner:
         best_uk_occurrence = uk_group.occurrences[max_idx[1]].occurrence_text
 
         return float(max_similarity), best_en_occurrence, best_uk_occurrence
-
-    def align_terms(
-        self,
-        min_group_size: int = 1,
-        max_alignments_per_en_term: Optional[int] = None,
-        num_processes: Optional[int] = None,
-    ) -> Tuple[List[AlignmentMatch], Dict[str, List[AlignmentMatch]]]:
-        """Align English and Ukrainian terms based on occurrence embeddings.
-
-        Args:
-            min_group_size: Minimum number of occurrences required per group.
-            max_alignments_per_en_term: Maximum alignments to keep per English term.
-            num_processes: Number of processes to use (None for CPU count).
-
-        Returns:
-            Tuple of (primary_alignments, potential_synonyms).
-        """
-        # Set default number of processes
-        if num_processes is None:
-            num_processes = min(mp.cpu_count(), 8)  # Cap at 8 to avoid memory issues
-
-        # Filter groups by minimum size
-        valid_en_groups = {
-            lemma: group
-            for lemma, group in self.en_groups.items()
-            if len(group) >= min_group_size
-        }
-        valid_uk_groups = {
-            lemma: group
-            for lemma, group in self.uk_groups.items()
-            if len(group) >= min_group_size
-        }
-
-        logging.info(
-            f"Processing {len(valid_en_groups)} English and {len(valid_uk_groups)} "
-            f"Ukrainian groups using {num_processes} processes (min_size={min_group_size})"
-        )
-
-        if not valid_en_groups or not valid_uk_groups:
-            logging.warning("No valid groups found for alignment")
-            return [], {}
-
-        # Serialize Ukrainian groups for multiprocessing
-        uk_groups_data = {
-            lemma: _serialize_lemma_group(group)
-            for lemma, group in valid_uk_groups.items()
-        }
-
-        # Prepare arguments for workers
-        worker_args = []
-        for en_lemma, en_group in valid_en_groups.items():
-            en_group_data = _serialize_lemma_group(en_group)
-            worker_args.append(
-                (
-                    en_lemma,
-                    en_group_data,
-                    uk_groups_data,
-                    self.similarity_threshold,
-                    max_alignments_per_en_term,
-                )
-            )
-
-        # Process in parallel
-        primary_alignments = []
-        potential_synonyms = defaultdict(list)
-
-        if num_processes == 1:
-            # Single-threaded processing for debugging
-            for args in tqdm(worker_args, desc="Aligning terms"):
-                en_lemma, group_alignments = _process_english_lemma_worker(args)
-                if group_alignments:
-                    primary_alignments.append(group_alignments[0])
-                    if len(group_alignments) > 1:
-                        potential_synonyms[en_lemma] = group_alignments[1:]
-        else:
-            # Multi-threaded processing
-            with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                # Submit all tasks
-                future_to_lemma = {
-                    executor.submit(_process_english_lemma_worker, args): args[0]
-                    for args in worker_args
-                }
-
-                # Collect results with progress bar
-                for future in tqdm(
-                    as_completed(future_to_lemma),
-                    total=len(future_to_lemma),
-                    desc="Aligning terms",
-                ):
-                    try:
-                        en_lemma, group_alignments = future.result()
-                        if group_alignments:
-                            primary_alignments.append(group_alignments[0])
-                            if len(group_alignments) > 1:
-                                potential_synonyms[en_lemma] = group_alignments[1:]
-                    except Exception as e:
-                        lemma = future_to_lemma[future]
-                        logging.error(f"Error processing lemma '{lemma}': {e}")
-
-        # Sort primary alignments by similarity score
-        primary_alignments.sort(key=lambda x: x.similarity_score, reverse=True)
-
-        logging.info(
-            f"Found {len(primary_alignments)} primary alignments and "
-            f"{len(potential_synonyms)} terms with potential synonyms"
-        )
-
-        return primary_alignments, dict(potential_synonyms)
 
     def align_terms(
         self,
@@ -485,6 +375,65 @@ class BilingualAligner:
             f"Saved {len(synonyms)} terms with potential synonyms to {output_path}"
         )
 
+    def _create_histogram(
+        self, scores: List[float], num_bins: int = 40, width: int = 60
+    ) -> str:
+        """Create a terminal histogram of similarity scores.
+
+        Args:
+            scores: List of similarity scores.
+            num_bins: Number of histogram bins.
+            width: Width of the histogram bars in characters.
+
+        Returns:
+            Formatted histogram string.
+        """
+        if not scores:
+            return "No scores to display histogram"
+
+        min_score = min(scores)
+        max_score = max(scores)
+
+        # Create bins
+        bin_width = (max_score - min_score) / num_bins
+        bins = [0] * num_bins
+
+        # Count scores in each bin
+        for score in scores:
+            # Handle edge case where score equals max_score
+            bin_idx = min(int((score - min_score) / bin_width), num_bins - 1)
+            bins[bin_idx] += 1
+
+        # Find max count for scaling
+        max_count = max(bins) if bins else 1
+
+        # Generate histogram
+        histogram_lines = []
+        histogram_lines.append("\nSimilarity Score Distribution (40 bins):")
+        histogram_lines.append("=" * (width + 20))
+
+        for i, count in enumerate(bins):
+            # Calculate bin range
+            bin_start = min_score + i * bin_width
+            bin_end = min_score + (i + 1) * bin_width
+
+            # Create bar
+            bar_length = int((count / max_count) * width) if max_count > 0 else 0
+            bar = "█" * bar_length
+
+            # Format line
+            if count > 0:
+                line = f"{bin_start:.3f}-{bin_end:.3f} │{bar:<{width}} │ {count:>4}"
+            else:
+                line = f"{bin_start:.3f}-{bin_end:.3f} │{'':<{width}} │ {count:>4}"
+
+            histogram_lines.append(line)
+
+        histogram_lines.append("=" * (width + 20))
+        histogram_lines.append(f"{'Range':<13} │{'Distribution':<{width}} │ Count")
+
+        return "\n".join(histogram_lines)
+
     def print_alignment_statistics(
         self,
         alignments: List[AlignmentMatch],
@@ -528,21 +477,8 @@ class BilingualAligner:
         print(f"  Max: {np.max(scores):.3f}")
         print(f"  Std: {np.std(scores):.3f}")
 
-        # # Quality buckets
-        # high_quality = sum(1 for s in scores if s >= 0.99)
-        # medium_quality = sum(1 for s in scores if 0.7 <= s < 0.97)
-        # low_quality = sum(1 for s in scores if s < 0.97)
-
-        # print(f"\nQuality Distribution:")
-        # print(
-        #     f"  Highest quality (≥0.99): {high_quality} ({high_quality/len(scores)*100:.1f}%)"
-        # )
-        # print(
-        #     f"  High quality (0.7-0.8): {medium_quality} ({medium_quality/len(scores)*100:.1f}%)"
-        # )
-        # print(
-        #     f"  Medium quality (<0.97): {low_quality} ({low_quality/len(scores)*100:.1f}%)"
-        # )
+        # Terminal histogram
+        print(self._create_histogram(scores, num_bins=40, width=50))
 
         # Synonyms
         if synonyms:
@@ -555,12 +491,12 @@ class BilingualAligner:
             )
 
         # Top alignments
-        print(f"\nTop 10 Alignments:")
+        print(f"\nTop 25 Alignments:")
         print(
             f"{'Rank':<4} {'English':<20} {'Ukrainian':<20} {'Score':<6} {'Best Pair':<30}"
         )
         print("-" * 80)
-        for i, align in enumerate(alignments[:10], 1):
+        for i, align in enumerate(alignments[:25], 1):
             pair_text = f"{align.en_occurrence} ↔ {align.uk_occurrence}"
             if len(pair_text) > 30:
                 pair_text = pair_text[:27] + "..."
@@ -774,7 +710,9 @@ def main() -> None:
 
         # Load embeddings
         logging.info("Loading English embeddings...")
-        aligner.load_embeddings_from_jsonl(args.english_embeddings, "en", max_terms=args.max_terms)
+        aligner.load_embeddings_from_jsonl(
+            args.english_embeddings, "en", max_terms=args.max_terms
+        )
 
         logging.info("Loading Ukrainian embeddings...")
         aligner.load_embeddings_from_jsonl(
