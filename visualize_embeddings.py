@@ -4,7 +4,8 @@
 This script loads multiple embedding files, applies t-SNE dimensionality reduction,
 and creates an interactive visualization to explore how terms from different
 languages/domains cluster in the embedding space. Supports both 2D and 3D
-visualizations for comprehensive analysis.
+visualizations for comprehensive analysis. Works with both term-level and
+occurrence-level embedding files.
 """
 
 import argparse
@@ -62,38 +63,74 @@ class EmbeddingVisualizer:
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line_num, line in enumerate(f):
                 try:
-                    record = json.loads(line.strip())
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    record = json.loads(line)
 
                     # Skip metadata lines
                     if record.get("type") == "metadata":
                         continue
 
-                    # Extract required fields
-                    term = record["term"]
-                    score = record["score"]
-                    embedding = np.array(record["embedding"])
+                    # Detect file format and extract appropriate fields
+                    if "occurrence_text" in record and "original_term" in record:
+                        # Occurrence-based embeddings format
+                        display_term = record["occurrence_text"]
+                        original_term = record["original_term"]
+                        occurrence_index = record.get("occurrence_index", 0)
+                        score = record["score"]
+                        embedding = np.array(record["embedding"])
 
-                    term_data.append(
-                        {
-                            "term": term,
-                            "score": score,
-                            "source": source_label,
-                            "file": jsonl_path.name,
-                        }
-                    )
+                        term_data.append(
+                            {
+                                "term": display_term,
+                                "original_term": original_term,
+                                "occurrence_index": occurrence_index,
+                                "score": score,
+                                "source": source_label,
+                                "file": jsonl_path.name,
+                                "data_type": "occurrence",
+                            }
+                        )
+
+                    elif "term" in record:
+                        # Term-based embeddings format
+                        term = record["term"]
+                        score = record["score"]
+                        embedding = np.array(record["embedding"])
+
+                        term_data.append(
+                            {
+                                "term": term,
+                                "original_term": term,  # Same as term for consistency
+                                "occurrence_index": 0,  # Default for term-level
+                                "score": score,
+                                "source": source_label,
+                                "file": jsonl_path.name,
+                                "data_type": "term",
+                            }
+                        )
+
+                    else:
+                        logging.warning(
+                            f"Unrecognized format on line {line_num} in {jsonl_path}"
+                        )
+                        continue
+
                     embeddings.append(embedding)
 
                     # Stop if we've reached the limit
                     if max_terms and len(term_data) >= max_terms:
                         break
 
-                except (json.JSONDecodeError, KeyError) as e:
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
                     logging.warning(
                         f"Skipping invalid line {line_num} in {jsonl_path}: {e}"
                     )
 
         embeddings_array = np.array(embeddings) if embeddings else np.empty((0, 0))
-        logging.info(f"Loaded {len(term_data)} terms from {jsonl_path}")
+        logging.info(f"Loaded {len(term_data)} embeddings from {jsonl_path}")
 
         return term_data, embeddings_array
 
@@ -137,7 +174,7 @@ class EmbeddingVisualizer:
         self.embeddings = np.vstack(all_embeddings)
 
         logging.info(
-            f"Total loaded: {len(self.data)} terms with {self.embeddings.shape[1]}-dim embeddings"
+            f"Total loaded: {len(self.data)} embeddings with {self.embeddings.shape[1]}-dim vectors"
         )
 
     def apply_tsne(
@@ -220,9 +257,12 @@ class EmbeddingVisualizer:
         # Create DataFrame for plotly
         df_data = {
             "term": [item["term"] for item in self.data],
+            "original_term": [item["original_term"] for item in self.data],
+            "occurrence_index": [item["occurrence_index"] for item in self.data],
             "score": [item["score"] for item in self.data],
             "source": [item["source"] for item in self.data],
             "file": [item["file"] for item in self.data],
+            "data_type": [item["data_type"] for item in self.data],
         }
 
         # Add coordinate columns based on dimensionality
@@ -253,7 +293,14 @@ class EmbeddingVisualizer:
                 x="x",
                 y="y",
                 color="source",
-                hover_data=["term", "score", "file"],
+                hover_data=[
+                    "term",
+                    "original_term",
+                    "occurrence_index",
+                    "score",
+                    "data_type",
+                    "file",
+                ],
                 title=title,
                 color_discrete_map=color_map,
                 width=width,
@@ -263,9 +310,12 @@ class EmbeddingVisualizer:
             # Update hover template for 2D
             hover_template = (
                 "<b>%{customdata[0]}</b><br>"
-                + "Score: %{customdata[1]:.4f}<br>"
+                + "Original: %{customdata[1]}<br>"
+                + "Occurrence: #%{customdata[2]}<br>"
+                + "Score: %{customdata[3]:.4f}<br>"
+                + "Type: %{customdata[4]}<br>"
                 + "Source: %{fullData.name}<br>"
-                + "File: %{customdata[2]}<br>"
+                + "File: %{customdata[5]}<br>"
                 + "Position: (%{x:.2f}, %{y:.2f})<br>"
                 + "<extra></extra>"
             )
@@ -282,7 +332,14 @@ class EmbeddingVisualizer:
                 y="y",
                 z="z",
                 color="source",
-                hover_data=["term", "score", "file"],
+                hover_data=[
+                    "term",
+                    "original_term",
+                    "occurrence_index",
+                    "score",
+                    "data_type",
+                    "file",
+                ],
                 title=title,
                 color_discrete_map=color_map,
                 width=width,
@@ -292,9 +349,12 @@ class EmbeddingVisualizer:
             # Update hover template for 3D
             hover_template = (
                 "<b>%{customdata[0]}</b><br>"
-                + "Score: %{customdata[1]:.4f}<br>"
+                + "Original: %{customdata[1]}<br>"
+                + "Occurrence: #%{customdata[2]}<br>"
+                + "Score: %{customdata[3]:.4f}<br>"
+                + "Type: %{customdata[4]}<br>"
                 + "Source: %{fullData.name}<br>"
-                + "File: %{customdata[2]}<br>"
+                + "File: %{customdata[5]}<br>"
                 + "Position: (%{x:.2f}, %{y:.2f}, %{z:.2f})<br>"
                 + "<extra></extra>"
             )
@@ -364,22 +424,37 @@ class EmbeddingVisualizer:
         """
         stats = []
         stats.append("<b>Dataset Statistics:</b>")
-        stats.append(f"Total terms: {len(df)}")
+        stats.append(f"Total embeddings: {len(df)}")
         stats.append(f"Dimensions: {n_dimensions}D t-SNE")
+
+        # Count data types
+        type_counts = df["data_type"].value_counts()
+        if len(type_counts) > 1:
+            stats.append(f"Types: {dict(type_counts)}")
+
         stats.append("")
 
         for source in df["source"].unique():
             source_df = df[df["source"] == source]
             avg_score = source_df["score"].mean()
-            stats.append(
-                f"<b>{source}:</b> {len(source_df)} terms (avg score: {avg_score:.3f})"
-            )
+            unique_terms = source_df["original_term"].nunique()
+            total_embeddings = len(source_df)
+
+            if "occurrence" in source_df["data_type"].values:
+                stats.append(
+                    f"<b>{source}:</b> {total_embeddings} occurrences "
+                    f"({unique_terms} unique terms, avg score: {avg_score:.3f})"
+                )
+            else:
+                stats.append(
+                    f"<b>{source}:</b> {total_embeddings} terms (avg score: {avg_score:.3f})"
+                )
 
         return "<br>".join(stats)
 
     def find_similar_terms(
         self, query_term: str, n_neighbors: int = 10, distance_threshold: float = None
-    ) -> List[Tuple[str, str, float, float]]:
+    ) -> List[Tuple[str, str, str, float, float, int]]:
         """Find terms similar to a query term in t-SNE space.
 
         Args:
@@ -388,15 +463,18 @@ class EmbeddingVisualizer:
             distance_threshold: Maximum distance threshold.
 
         Returns:
-            List of (term, source, score, distance) tuples.
+            List of (term, original_term, source, score, distance, occurrence_index) tuples.
         """
         if self.tsne_results is None:
             raise ValueError("No t-SNE results available")
 
-        # Find the query term
+        # Find the query term (search in both term and original_term fields)
         query_idx = None
         for i, item in enumerate(self.data):
-            if item["term"].lower() == query_term.lower():
+            if (
+                item["term"].lower() == query_term.lower()
+                or item["original_term"].lower() == query_term.lower()
+            ):
                 query_idx = i
                 break
 
@@ -417,7 +495,14 @@ class EmbeddingVisualizer:
 
             if distance_threshold is None or distance <= distance_threshold:
                 neighbors.append(
-                    (item["term"], item["source"], item["score"], distance)
+                    (
+                        item["term"],
+                        item["original_term"],
+                        item["source"],
+                        item["score"],
+                        distance,
+                        item["occurrence_index"],
+                    )
                 )
 
         return neighbors
@@ -429,19 +514,20 @@ def main() -> None:
         description="Visualize term embeddings using 2D or 3D t-SNE. "
         "Creates an interactive plot to explore how terms from different "
         "languages/sources cluster in the embedding space. Supports both "
-        "2D and 3D visualizations with full interactivity."
+        "2D and 3D visualizations with full interactivity. Works with both "
+        "term-level and occurrence-level embedding files."
     )
     parser.add_argument(
         "embedding_files",
         nargs="+",
         type=Path,
-        help="JSONL embedding files to visualize",
+        help="JSONL embedding files to visualize (term or occurrence level)",
     )
     parser.add_argument(
         "--max-terms-per-file",
         type=int,
         default=500,
-        help="Maximum terms to load per file (default: 500)",
+        help="Maximum embeddings to load per file (default: 500)",
     )
     parser.add_argument(
         "--source-labels", nargs="+", help="Custom labels for each source file"
@@ -473,8 +559,8 @@ def main() -> None:
     parser.add_argument(
         "--max-iter",
         type=int,
-        default=1000,
-        help="Maximum number of t-SNE iterations (default: 1000)",
+        default=2000,
+        help="Maximum number of t-SNE iterations (default: 2000)",
     )
     parser.add_argument(
         "--learning-rate", default="auto", help="t-SNE learning rate (default: auto)"
@@ -559,9 +645,6 @@ def main() -> None:
             point_size=args.point_size,
         )
 
-        # Show the plot
-        fig.show()
-
         # Find similar terms if requested
         if args.find_similar:
             try:
@@ -570,12 +653,20 @@ def main() -> None:
                 )
                 print(f"\nTerms similar to '{args.find_similar}':")
                 print(
-                    f"{'Rank':<4} {'Term':<30} {'Source':<15} {'Score':<8} {'Distance':<8}"
+                    f"{'Rank':<4} {'Term':<25} {'Original':<25} {'Source':<15} {'Score':<8} {'Distance':<8} {'Occ#':<4}"
                 )
-                print("-" * 70)
-                for i, (term, source, score, distance) in enumerate(neighbors, 1):
+                print("-" * 90)
+                for i, (
+                    term,
+                    original_term,
+                    source,
+                    score,
+                    distance,
+                    occ_idx,
+                ) in enumerate(neighbors, 1):
                     print(
-                        f"{i:<4} {term:<30} {source:<15} {score:<8.3f} {distance:<8.3f}"
+                        f"{i:<4} {term:<25} {original_term:<25} {source:<15} "
+                        f"{score:<8.3f} {distance:<8.3f} {occ_idx:<4}"
                     )
             except ValueError as e:
                 logging.error(f"Error finding similar terms: {e}")
@@ -585,7 +676,7 @@ def main() -> None:
         print("EMBEDDING VISUALIZATION RESULTS")
         print(f"{'='*60}")
         print(f"Input files: {len(args.embedding_files)}")
-        print(f"Total terms visualized: {len(visualizer.data)}")
+        print(f"Total embeddings visualized: {len(visualizer.data)}")
         print(f"Embedding dimension: {visualizer.embeddings.shape[1]}")
         print(f"t-SNE dimensions: {args.dimensions}D")
         print(f"t-SNE perplexity: {args.perplexity}")
@@ -594,13 +685,20 @@ def main() -> None:
 
         # Show source breakdown
         sources = {}
+        data_types = {}
         for item in visualizer.data:
             source = item["source"]
+            data_type = item["data_type"]
             sources[source] = sources.get(source, 0) + 1
+            data_types[data_type] = data_types.get(data_type, 0) + 1
 
-        print(f"\nTerms by source:")
+        print(f"\nEmbeddings by source:")
         for source, count in sources.items():
-            print(f"  {source}: {count} terms")
+            print(f"  {source}: {count} embeddings")
+
+        print(f"\nEmbeddings by type:")
+        for data_type, count in data_types.items():
+            print(f"  {data_type}: {count} embeddings")
 
     except KeyboardInterrupt:
         logging.info("Visualization interrupted by user")

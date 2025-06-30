@@ -17,7 +17,7 @@ spacy download en_core_web_trf
 ```
 
 ## Prerequisites
-Create a token for wikimedia API to enjoy higher rate limits (100 reqs/h -> 5000 reqs/h).
+[Create a token](https://api.wikimedia.org/wiki/Authentication#Personal_API_tokens) for wikimedia API to enjoy higher rate limits (100 reqs/h -> 5000 reqs/h).
 
 Pick the domain of your interest from domains.csv (or add your own domain, identified by wikidata id), and remove the rest of domains (keep headers tho!).
 
@@ -165,4 +165,5 @@ Output files:
 ## Optional fun: visualize embeddings with interactive visualizer and t-SNE (2d or 3d!)
 
 `python visualize_embeddings.py term_embeddings/aircraft_en_cvalue_terms_embeddings.jsonl term_embeddings/aircraft_uk_cvalue_terms_embeddings.jsonl --source-labels "English" "Ukrainian"  --dimensions 2 --max-terms-per-file 1500`
+then open the file `embedding_visualization_2files.html`
 
