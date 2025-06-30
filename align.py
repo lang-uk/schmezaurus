@@ -643,8 +643,8 @@ def main() -> None:
     parser.add_argument(
         "--similarity-threshold",
         type=float,
-        default=0.95,
-        help="Minimum similarity score for valid alignments (default: 0.95)",
+        default=0.90,
+        help="Minimum similarity score for valid alignments (default: 0.90)",
     )
     parser.add_argument(
         "--min-group-size",
