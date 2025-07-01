@@ -34,6 +34,7 @@ python corpora_downloader.py domain_entities/aircraft.csv --bearer-token ...
 # Combine all downloaded texts for domain/language and run cvalue term extraction for the language.
 # It'll take some time.
 python ate_it.py extracted_texts/aircraft_uk.jsonl --allow-single-word --language uk --max-text-length 3000_000 --n-max 4 --save-occurrences
+python ate_it.py extracted_texts/aircraft_en.jsonl --allow-single-word --language en --max-text-length 3000_000 --n-max 4 --save-occurrences
 # the results are stored in extracted_terms/
 
 # Create term embeddings for term occurences using LaBSE and store them
