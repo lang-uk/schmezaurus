@@ -6,6 +6,10 @@ lemmatized terms, and finds the best matches between language pairs using
 maximum cosine similarity between occurrence pairs. Identifies potential
 synonyms when multiple Ukrainian groups match the same English group.
 Supports parallel processing for faster computation.
+
+Enhanced with:
+- Language-specific character filtering (English/Ukrainian)
+- Meta score calculation: (avg_en_score + avg_uk_score) / 2 * cosine_similarity
 """
 
 import argparse
@@ -13,14 +17,43 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
+
+
+def has_english_characters(text: str) -> bool:
+    """Check if text contains at least one English/Latin character.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if text contains English characters, False otherwise.
+    """
+    # Latin alphabet range (Basic Latin + Latin-1 Supplement)
+    english_pattern = re.compile(r"[a-zA-Z]")
+    return bool(english_pattern.search(text))
+
+
+def has_ukrainian_characters(text: str) -> bool:
+    """Check if text contains at least one Ukrainian/Cyrillic character.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if text contains Ukrainian characters, False otherwise.
+    """
+    # Ukrainian Cyrillic characters (including specific Ukrainian letters)
+    ukrainian_pattern = re.compile(r"[а-яА-ЯіІїЇєЄҐґ]")
+    return bool(ukrainian_pattern.search(text))
 
 
 class TermOccurrence(NamedTuple):
@@ -47,6 +80,7 @@ class LemmaGroup:
         self.language = language
         self.occurrences: List[TermOccurrence] = []
         self.avg_score = 0.0
+        self.max_score = 0.0
         self.embedding_matrix: Optional[np.ndarray] = None
 
     def add_occurrence(self, occurrence: TermOccurrence) -> None:
@@ -60,6 +94,7 @@ class LemmaGroup:
             self.avg_score = sum(occ.score for occ in self.occurrences) / len(
                 self.occurrences
             )
+            self.max_score = max(occ.score for occ in self.occurrences)
             # Stack embeddings for efficient similarity computation
             self.embedding_matrix = np.stack(
                 [occ.embedding for occ in self.occurrences]
@@ -88,20 +123,53 @@ class AlignmentMatch(NamedTuple):
     uk_group_size: int
     en_avg_score: float
     uk_avg_score: float
+    en_max_score: float
+    uk_max_score: float
+    meta_score: float  # New field: (en_max_score + uk_max_score) / 2 * similarity_score
 
 
 class BilingualAligner:
     """Aligns bilingual terms using occurrence-level embeddings."""
 
-    def __init__(self, similarity_threshold: float = 0.7) -> None:
+    def __init__(
+        self, similarity_threshold: float = 0.7, enable_filtering: bool = True
+    ) -> None:
         """Initialize the bilingual aligner.
 
         Args:
             similarity_threshold: Minimum similarity score for valid alignments.
+            enable_filtering: Whether to enable language-specific character filtering.
         """
         self.similarity_threshold = similarity_threshold
+        self.enable_filtering = enable_filtering
         self.en_groups: Dict[str, LemmaGroup] = {}
         self.uk_groups: Dict[str, LemmaGroup] = {}
+        self.filtered_stats = {
+            "en_total_loaded": 0,
+            "en_filtered_out": 0,
+            "uk_total_loaded": 0,
+            "uk_filtered_out": 0,
+        }
+
+    def _should_include_group(self, lemma: str, language: str) -> bool:
+        """Check if a lemma group should be included based on character filtering.
+
+        Args:
+            lemma: The lemmatized term.
+            language: Language code ('en' or 'uk').
+
+        Returns:
+            True if the group should be included, False if filtered out.
+        """
+        if not self.enable_filtering:
+            return True
+
+        if language == "en":
+            return has_english_characters(lemma)
+        elif language == "uk":
+            return has_ukrainian_characters(lemma)
+        else:
+            return True  # Unknown language, include by default
 
     def load_embeddings_from_jsonl(
         self, jsonl_path: Path, language: str, max_terms: Optional[int] = None
@@ -114,6 +182,8 @@ class BilingualAligner:
             max_terms: Maximum number of unique terms to load.
         """
         groups = self.en_groups if language == "en" else self.uk_groups
+        total_loaded = 0
+        filtered_out = 0
 
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
@@ -135,20 +205,27 @@ class BilingualAligner:
                     score = record["score"]
                     embedding = np.array(record["embedding"])
 
-                    # Create occurrence object
-                    occurrence = TermOccurrence(
-                        original_term=original_term,
-                        occurrence_text=occurrence_text,
-                        occurrence_index=occurrence_index,
-                        score=score,
-                        embedding=embedding,
-                    )
+                    total_loaded += 1
 
-                    # Add to appropriate group
+                    # Apply character filtering
                     if original_term not in groups:
+                        if not self._should_include_group(original_term, language):
+                            filtered_out += 1
+                            continue
                         groups[original_term] = LemmaGroup(original_term, language)
 
-                    groups[original_term].add_occurrence(occurrence)
+                    # Only add occurrence if the group wasn't filtered out
+                    if original_term in groups:
+                        # Create occurrence object
+                        occurrence = TermOccurrence(
+                            original_term=original_term,
+                            occurrence_text=occurrence_text,
+                            occurrence_index=occurrence_index,
+                            score=score,
+                            embedding=embedding,
+                        )
+
+                        groups[original_term].add_occurrence(occurrence)
 
                     if max_terms and len(groups) >= max_terms:
                         break
@@ -159,14 +236,28 @@ class BilingualAligner:
                     )
                     continue
 
+        # Update filtering statistics
+        if language == "en":
+            self.filtered_stats["en_total_loaded"] = total_loaded
+            self.filtered_stats["en_filtered_out"] = filtered_out
+        else:
+            self.filtered_stats["uk_total_loaded"] = total_loaded
+            self.filtered_stats["uk_filtered_out"] = filtered_out
+
         logging.info(
             f"Loaded {sum(len(group) for group in groups.values())} occurrences "
             f"for {len(groups)} unique {language.upper()} lemmas from {jsonl_path}"
         )
 
+        if self.enable_filtering and filtered_out > 0:
+            logging.info(
+                f"Filtered out {filtered_out} {language.upper()} terms without "
+                f"proper {language.upper()} characters ({filtered_out/total_loaded*100:.1f}%)"
+            )
+
     def find_best_alignment(
         self, en_group: LemmaGroup, uk_group: LemmaGroup
-    ) -> Tuple[float, str, str]:
+    ) -> Tuple[float, str, str, float]:
         """Find the best alignment between two lemma groups.
 
         Args:
@@ -174,7 +265,7 @@ class BilingualAligner:
             uk_group: Ukrainian lemma group.
 
         Returns:
-            Tuple of (max_similarity, best_en_occurrence, best_uk_occurrence).
+            Tuple of (max_similarity, best_en_occurrence, best_uk_occurrence, meta_score).
         """
         # Calculate cosine similarity between all occurrence pairs
         similarities = cosine_similarity(
@@ -188,7 +279,12 @@ class BilingualAligner:
         best_en_occurrence = en_group.occurrences[max_idx[0]].occurrence_text
         best_uk_occurrence = uk_group.occurrences[max_idx[1]].occurrence_text
 
-        return float(max_similarity), best_en_occurrence, best_uk_occurrence
+        # Calculate meta score: (avg_en_score + avg_uk_score) / 2 * cosine_similarity
+        meta_score = ((en_group.avg_score + uk_group.avg_score) / 2) * float(
+            max_similarity
+        )
+
+        return float(max_similarity), best_en_occurrence, best_uk_occurrence, meta_score
 
     def align_terms(
         self,
@@ -288,8 +384,8 @@ class BilingualAligner:
                         lemma = future_to_lemma[future]
                         logging.error(f"Error processing lemma '{lemma}': {e}")
 
-        # Sort primary alignments by similarity score
-        primary_alignments.sort(key=lambda x: x.similarity_score, reverse=True)
+        # Sort primary alignments by meta score (descending)
+        primary_alignments.sort(key=lambda x: x.meta_score, reverse=True)
 
         logging.info(
             f"Found {len(primary_alignments)} primary alignments and "
@@ -329,6 +425,9 @@ class BilingualAligner:
                     "uk_group_size": alignment.uk_group_size,
                     "en_avg_score": alignment.en_avg_score,
                     "uk_avg_score": alignment.uk_avg_score,
+                    "en_max_score": alignment.en_max_score,
+                    "uk_max_score": alignment.uk_max_score,
+                    "meta_score": alignment.meta_score,  # Include new meta score
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -364,6 +463,7 @@ class BilingualAligner:
                             "uk_occurrence": align.uk_occurrence,
                             "uk_group_size": align.uk_group_size,
                             "uk_avg_score": align.uk_avg_score,
+                            "meta_score": align.meta_score,  # Include meta score
                         }
                         for align in synonym_alignments
                     ],
@@ -376,32 +476,40 @@ class BilingualAligner:
         )
 
     def _create_histogram(
-        self, scores: List[float], num_bins: int = 40, width: int = 60
+        self,
+        scores: List[float],
+        num_bins: int = 40,
+        width: int = 60,
+        title: str = "Distribution",
     ) -> str:
-        """Create a terminal histogram of similarity scores.
+        """Create a terminal histogram of scores.
 
         Args:
-            scores: List of similarity scores.
+            scores: List of scores.
             num_bins: Number of histogram bins.
             width: Width of the histogram bars in characters.
+            title: Title for the histogram.
 
         Returns:
             Formatted histogram string.
         """
         if not scores:
-            return "No scores to display histogram"
+            return f"No scores to display histogram for {title}"
 
         min_score = min(scores)
         max_score = max(scores)
 
         # Create bins
-        bin_width = (max_score - min_score) / num_bins
+        bin_width = (max_score - min_score) / num_bins if max_score > min_score else 1
         bins = [0] * num_bins
 
         # Count scores in each bin
         for score in scores:
             # Handle edge case where score equals max_score
-            bin_idx = min(int((score - min_score) / bin_width), num_bins - 1)
+            if max_score > min_score:
+                bin_idx = min(int((score - min_score) / bin_width), num_bins - 1)
+            else:
+                bin_idx = 0
             bins[bin_idx] += 1
 
         # Find max count for scaling
@@ -409,7 +517,7 @@ class BilingualAligner:
 
         # Generate histogram
         histogram_lines = []
-        histogram_lines.append("\nSimilarity Score Distribution (40 bins):")
+        histogram_lines.append(f"\n{title} (40 bins):")
         histogram_lines.append("=" * (width + 20))
 
         for i, count in enumerate(bins):
@@ -450,7 +558,8 @@ class BilingualAligner:
             return
 
         # Basic statistics
-        scores = [align.similarity_score for align in alignments]
+        similarity_scores = [align.similarity_score for align in alignments]
+        meta_scores = [align.meta_score for align in alignments]
         en_coverage = len(set(align.en_lemma for align in alignments))
         uk_coverage = len(set(align.uk_lemma for align in alignments))
 
@@ -469,16 +578,55 @@ class BilingualAligner:
         print(f"Similarity threshold: {self.similarity_threshold}")
         print(f"Processing: {len(alignments)} alignments computed")
 
-        # Score distribution
-        print(f"\nSimilarity Score Distribution:")
-        print(f"  Mean: {np.mean(scores):.3f}")
-        print(f"  Median: {np.median(scores):.3f}")
-        print(f"  Min: {np.min(scores):.3f}")
-        print(f"  Max: {np.max(scores):.3f}")
-        print(f"  Std: {np.std(scores):.3f}")
+        # Filtering statistics
+        if self.enable_filtering:
+            print(f"\nCharacter Filtering Statistics:")
+            en_kept = (
+                self.filtered_stats["en_total_loaded"]
+                - self.filtered_stats["en_filtered_out"]
+            )
+            uk_kept = (
+                self.filtered_stats["uk_total_loaded"]
+                - self.filtered_stats["uk_filtered_out"]
+            )
+            print(
+                f"  English: {en_kept}/{self.filtered_stats['en_total_loaded']} terms kept "
+                f"({en_kept/max(1, self.filtered_stats['en_total_loaded'])*100:.1f}%)"
+            )
+            print(
+                f"  Ukrainian: {uk_kept}/{self.filtered_stats['uk_total_loaded']} terms kept "
+                f"({uk_kept/max(1, self.filtered_stats['uk_total_loaded'])*100:.1f}%)"
+            )
 
-        # Terminal histogram
-        print(self._create_histogram(scores, num_bins=40, width=50))
+        # Score distributions
+        print(f"\nSimilarity Score Distribution:")
+        print(f"  Mean: {np.mean(similarity_scores):.3f}")
+        print(f"  Median: {np.median(similarity_scores):.3f}")
+        print(f"  Min: {np.min(similarity_scores):.3f}")
+        print(f"  Max: {np.max(similarity_scores):.3f}")
+        print(f"  Std: {np.std(similarity_scores):.3f}")
+
+        print(f"\nMeta Score Distribution:")
+        print(f"  Mean: {np.mean(meta_scores):.3f}")
+        print(f"  Median: {np.median(meta_scores):.3f}")
+        print(f"  Min: {np.min(meta_scores):.3f}")
+        print(f"  Max: {np.max(meta_scores):.3f}")
+        print(f"  Std: {np.std(meta_scores):.3f}")
+
+        # Terminal histograms
+        print(
+            self._create_histogram(
+                similarity_scores,
+                num_bins=40,
+                width=50,
+                title="Similarity Score Distribution",
+            )
+        )
+        print(
+            self._create_histogram(
+                meta_scores, num_bins=40, width=50, title="Meta Score Distribution"
+            )
+        )
 
         # Synonyms
         if synonyms:
@@ -490,19 +638,19 @@ class BilingualAligner:
                 f"  Average synonyms per term: {total_synonym_pairs/len(synonyms):.1f}"
             )
 
-        # Top alignments
-        print(f"\nTop 25 Alignments:")
+        # Top alignments (sorted by meta score)
+        print(f"\nTop 25 Alignments (by Meta Score):")
         print(
-            f"{'Rank':<4} {'English':<20} {'Ukrainian':<20} {'Score':<6} {'Best Pair':<30}"
+            f"{'Rank':<4} {'English':<20} {'Ukrainian':<20} {'Sim':<6} {'Meta':<8} {'Best Pair':<30}"
         )
-        print("-" * 80)
+        print("-" * 90)
         for i, align in enumerate(alignments[:25], 1):
             pair_text = f"{align.en_occurrence} ↔ {align.uk_occurrence}"
             if len(pair_text) > 30:
                 pair_text = pair_text[:27] + "..."
             print(
                 f"{i:<4} {align.en_lemma:<20} {align.uk_lemma:<20} "
-                f"{align.similarity_score:<6.3f} {pair_text:<30}"
+                f"{align.similarity_score:<6.3f} {align.meta_score:<8.1f} {pair_text:<30}"
             )
 
 
@@ -566,6 +714,11 @@ def _process_english_lemma_worker(
             best_en_occurrence = en_group.occurrences[max_idx[0]].occurrence_text
             best_uk_occurrence = uk_group.occurrences[max_idx[1]].occurrence_text
 
+            # Calculate meta score
+            meta_score = (
+                (en_group.max_score + uk_group.max_score) / 2
+            ) * max_similarity
+
             alignment = AlignmentMatch(
                 en_lemma=en_lemma,
                 uk_lemma=uk_lemma,
@@ -576,11 +729,14 @@ def _process_english_lemma_worker(
                 uk_group_size=len(uk_group),
                 en_avg_score=en_group.avg_score,
                 uk_avg_score=uk_group.avg_score,
+                en_max_score=en_group.max_score,
+                uk_max_score=uk_group.max_score,
+                meta_score=meta_score,
             )
             group_alignments.append(alignment)
 
-    # Sort by similarity score (descending)
-    group_alignments.sort(key=lambda x: x.similarity_score, reverse=True)
+    # Sort by meta score (descending)
+    group_alignments.sort(key=lambda x: x.meta_score, reverse=True)
 
     # Limit alignments if specified
     if max_alignments_per_en_term:
@@ -622,7 +778,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Align bilingual terms using cosine similarity between occurrence embeddings. "
         "Groups occurrences by lemmatized terms and finds best matches between English "
-        "and Ukrainian groups using maximum similarity between occurrence pairs."
+        "and Ukrainian groups using maximum similarity between occurrence pairs. "
+        "Includes language-specific character filtering and meta score calculation."
     )
     parser.add_argument(
         "english_embeddings",
@@ -677,6 +834,11 @@ def main() -> None:
         help="Number of processes to use (default: number of CPU cores, max 8)",
     )
     parser.add_argument(
+        "--disable-filtering",
+        action="store_true",
+        help="Disable language-specific character filtering",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -706,7 +868,11 @@ def main() -> None:
 
     try:
         # Initialize aligner
-        aligner = BilingualAligner(similarity_threshold=args.similarity_threshold)
+        enable_filtering = not args.disable_filtering
+        aligner = BilingualAligner(
+            similarity_threshold=args.similarity_threshold,
+            enable_filtering=enable_filtering,
+        )
 
         # Load embeddings
         logging.info("Loading English embeddings...")
@@ -735,6 +901,7 @@ def main() -> None:
             "min_group_size": args.min_group_size,
             "max_alignments_per_term": args.max_alignments_per_term,
             "num_processes": args.num_processes or mp.cpu_count(),
+            "character_filtering_enabled": enable_filtering,
             "total_alignments": len(alignments),
             "terms_with_synonyms": len(synonyms),
         }
@@ -758,6 +925,13 @@ def main() -> None:
         num_processes_used = args.num_processes or mp.cpu_count()
         if num_processes_used > 1:
             print(f"\nProcessing completed using {num_processes_used} processes")
+
+        if enable_filtering:
+            print(
+                f"\nCharacter filtering was enabled - terms without proper language-specific characters were excluded"
+            )
+        else:
+            print(f"\nCharacter filtering was disabled - all terms were processed")
 
     except KeyboardInterrupt:
         logging.info("Alignment interrupted by user")
