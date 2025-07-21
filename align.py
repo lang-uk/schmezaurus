@@ -126,6 +126,8 @@ class AlignmentMatch(NamedTuple):
     en_max_score: float
     uk_max_score: float
     meta_score: float  # New field: (en_max_score + uk_max_score) / 2 * similarity_score
+    all_en_occurrences: List[str]
+    all_uk_occurrences: List[str]
 
 
 class BilingualAligner:
@@ -421,6 +423,8 @@ class BilingualAligner:
                     "similarity_score": alignment.similarity_score,
                     "en_occurrence": alignment.en_occurrence,
                     "uk_occurrence": alignment.uk_occurrence,
+                    "all_en_occurrences": alignment.all_en_occurrences,
+                    "all_uk_occurrences": alignment.all_uk_occurrences,
                     "en_group_size": alignment.en_group_size,
                     "uk_group_size": alignment.uk_group_size,
                     "en_avg_score": alignment.en_avg_score,
@@ -464,6 +468,8 @@ class BilingualAligner:
                             "uk_group_size": align.uk_group_size,
                             "uk_avg_score": align.uk_avg_score,
                             "meta_score": align.meta_score,  # Include meta score
+                            "all_uk_occurrences": align.all_uk_occurrences,
+                            "all_en_occurrences": align.all_en_occurrences,
                         }
                         for align in synonym_alignments
                     ],
@@ -725,6 +731,8 @@ def _process_english_lemma_worker(
                 similarity_score=max_similarity,
                 en_occurrence=best_en_occurrence,
                 uk_occurrence=best_uk_occurrence,
+                all_en_occurrences=[occ.occurrence_text for occ in en_group.occurrences],
+                all_uk_occurrences=[occ.occurrence_text for occ in uk_group.occurrences],
                 en_group_size=len(en_group),
                 uk_group_size=len(uk_group),
                 en_avg_score=en_group.avg_score,
@@ -736,7 +744,7 @@ def _process_english_lemma_worker(
             group_alignments.append(alignment)
 
     # Sort by meta score (descending)
-    group_alignments.sort(key=lambda x: x.meta_score, reverse=True)
+    group_alignments.sort(key=lambda x: x.similarity_score, reverse=True)
 
     # Limit alignments if specified
     if max_alignments_per_en_term:
