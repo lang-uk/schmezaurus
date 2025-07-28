@@ -432,6 +432,8 @@ class BilingualAligner:
                     "en_max_score": alignment.en_max_score,
                     "uk_max_score": alignment.uk_max_score,
                     "meta_score": alignment.meta_score,  # Include new meta score
+                    "en_lemma_word_count": len(alignment.en_lemma.split()),
+                    "uk_lemma_word_count": len(alignment.uk_lemma.split()),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
